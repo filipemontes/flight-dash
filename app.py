@@ -8,7 +8,7 @@ import streamlit as st
 # -----------------------------
 st.set_page_config(page_title="Flights & Customers Explorer", layout="wide")
 st.title("✈️ Flights & Customers – Explorer")
-st.caption("Distributions on Flights merged by Loyalty, separate correlations (Customers vs Flights-merged), and numeric↔numeric plots for Flights only.")
+st.caption("Distributions on Flights grouped by Loyalty, separate correlations (Customers vs Flights-grouped), and numeric↔numeric plots for Flights only.")
 
 # -----------------------------
 # Helpers & caching
@@ -90,27 +90,76 @@ if not ok_customers and not ok_flights:
     st.stop()
 
 # -----------------------------
-# Auto-merge Flights ⟵ Customers (by Loyalty#) for distributions & its own correlations
+# Flights "merge" == GROUP BY Loyalty# (same approach as notebook)
 # -----------------------------
-merge_key = "Loyalty#"
-merged_flights = None
-if ok_customers and ok_flights and (merge_key in df_customer.columns) and (merge_key in df_flights.columns):
-    merged_flights = df_flights.merge(df_customer, how="left", on=merge_key)
-else:
-    if not ok_flights:
-        st.warning("Flights CSV not loaded; flights tabs will be disabled.")
-    if not ok_customers:
-        st.warning("Customers CSV not loaded; merged-flights distributions/correlations will be unavailable.")
-    if ok_customers and ok_flights and (merge_key not in df_customer.columns or merge_key not in df_flights.columns):
-        st.warning(f"Cannot merge Flights by `{merge_key}`: the column is missing in one of the datasets.")
+# Notebook activity columns
+activity_cols = [
+    "NumFlights", "NumFlightsWithCompanions", "DistanceKM",
+    "PointsAccumulated", "PointsRedeemed", "DollarCostPointsRedeemed"
+]
+
+def flights_groupby_loyalty(df_flights_: pd.DataFrame) -> pd.DataFrame:
+    df = df_flights_.copy()
+
+    # Ensure YearMonthDate exists as datetime (as in notebook)
+    if "YearMonthDate" in df.columns:
+        df["YearMonthDate"] = pd.to_datetime(df["YearMonthDate"], errors="coerce")
+
+    # Make sure the activity columns exist (fill missing with 0) — minimal, just to run
+    for c in activity_cols:
+        if c not in df.columns:
+            df[c] = 0
+
+    # WasActive flag (any activity > 0), same idea as notebook
+    df["WasActive"] = df[activity_cols].fillna(0).sum(axis=1) > 0
+
+    # --- Aggregations on ALL rows (totals) ---
+    agg_all = df.groupby("Loyalty#").agg(
+        NumFlights_Sum=("NumFlights", "sum"),
+        NumFlightsWithCompanions_Sum=("NumFlightsWithCompanions", "sum"),
+        DistanceKM_Sum=("DistanceKM", "sum"),
+        PointsAccumulated_Sum=("PointsAccumulated", "sum"),
+        PointsRedeemed_Sum=("PointsRedeemed", "sum"),
+        DollarCostPointsRedeemed_Sum=("DollarCostPointsRedeemed", "sum"),
+    )
+
+    # --- Aggregations on ACTIVE rows only ---
+    active = df.loc[df["WasActive"]].copy()
+    if "Year" in active.columns and "YearMonthDate" in active.columns:
+        agg_active = active.groupby("Loyalty#").agg(
+            ActiveYears=("Year", "nunique"),
+            ActiveMonths=("YearMonthDate", "nunique"),
+            LastActiveDate=("YearMonthDate", "max"),
+        )
+    elif "Year" in active.columns:
+        agg_active = active.groupby("Loyalty#").agg(
+            ActiveYears=("Year", "nunique"),
+            ActiveMonths=("Year", "count"),
+        )
+        agg_active["LastActiveDate"] = pd.NaT
+    else:
+        agg_active = active.groupby("Loyalty#").agg(
+            ActiveMonths=("WasActive", "sum")
+        )
+        agg_active["ActiveYears"] = np.nan
+        agg_active["LastActiveDate"] = pd.NaT
+
+    # Combine as in notebook: totals ⟵ active-metrics
+    df_flights_grouped = (
+        agg_all.merge(agg_active, how="left", on="Loyalty#")
+               .reset_index()
+    )
+    return df_flights_grouped
+
+flights_grouped = flights_groupby_loyalty(df_flights) if ok_flights else None
 
 # -----------------------------
 # Tabs
 # -----------------------------
 tabs = st.tabs([
     "👀 Overview",
-    "📊 Distributions (Flights merged by Loyalty)",
-    "🧮 Correlations (Customers vs Flights-merged)",
+    "📊 Distributions (Flights grouped by Loyalty)",
+    "🧮 Correlations (Customers vs Flights-grouped)",
     "📈 Flights Only: Numeric ↔ Numeric"
 ])
 
@@ -129,7 +178,7 @@ with tabs[0]:
             st.info("Customers CSV not loaded.")
 
     with c2:
-        st.markdown("**Flights**")
+        st.markdown("**Flights (raw)**")
         if ok_flights:
             st.write(df_flights.shape)
             st.dataframe(df_flights.head(50))
@@ -137,47 +186,47 @@ with tabs[0]:
             st.info("Flights CSV not loaded.")
 
     with c3:
-        st.markdown("**Flights (merged by Loyalty)**")
-        if merged_flights is not None:
-            st.write(merged_flights.shape)
-            st.dataframe(merged_flights.head(50))
+        st.markdown("**Flights (grouped by Loyalty)**")
+        if flights_grouped is not None:
+            st.write(flights_grouped.shape)
+            st.dataframe(flights_grouped.head(50))
             st.download_button(
-                "Download Flights (merged) CSV",
-                data=merged_flights.to_csv(index=False).encode("utf-8"),
-                file_name="flights_merged_by_loyalty.csv",
+                "Download Flights (grouped) CSV",
+                data=flights_grouped.to_csv(index=False).encode("utf-8"),
+                file_name="flights_grouped_by_loyalty.csv",
                 mime="text/csv"
             )
         else:
-            st.info("Merged Flights unavailable (need both CSVs and a shared `Loyalty#`).")
+            st.info("Grouped flights unavailable (need Flights CSV).")
 
 # -----------------------------
-# Distributions – use Flights merged by Loyalty
+# Distributions – use Flights grouped by Loyalty
 # -----------------------------
 with tabs[1]:
-    st.subheader("Distributions – Flights merged by Loyalty")
-    if merged_flights is None:
-        st.warning("Merged Flights not available. Load both CSVs with a common `Loyalty#`.")
+    st.subheader("Distributions – Flights grouped by Loyalty")
+    if flights_grouped is None:
+        st.warning("Grouped flights not available.")
     else:
-        col = st.selectbox("Pick a column", options=merged_flights.columns.tolist())
+        col = st.selectbox("Pick a column", options=flights_grouped.columns.tolist())
         if col:
-            series = merged_flights[col]
+            series = flights_grouped[col]
             if is_numeric(series):
                 bins = st.slider("Bins", 10, 100, 40, step=5)
-                safe_hist(merged_flights, col, bins=bins)
+                safe_hist(flights_grouped, col, bins=bins)
                 st.caption("Numeric distribution (histogram).")
             else:
                 topn = st.slider("Show top N categories", 5, 50, 25, step=5)
-                safe_bar_counts(merged_flights, col, top_n=topn)
+                safe_bar_counts(flights_grouped, col, top_n=topn)
                 st.caption("Categorical distribution (bar chart).")
 
         with st.expander("Describe numeric columns"):
-            st.dataframe(merged_flights.describe(include=[np.number]).T)
+            st.dataframe(flights_grouped.describe(include=[np.number]).T)
 
         with st.expander("Describe categorical columns"):
-            st.dataframe(merged_flights.describe(include=["object", "category"]).T)
+            st.dataframe(flights_grouped.describe(include=["object", "category"]).T)
 
 # -----------------------------
-# Correlations – separate (Customers) and (Flights merged by Loyalty)
+# Correlations – separate (Customers) and (Flights grouped by Loyalty)
 # -----------------------------
 with tabs[2]:
     st.subheader("Correlations (separate)")
@@ -189,13 +238,13 @@ with tabs[2]:
             st.info("Customers CSV not loaded.")
 
     with cB:
-        if merged_flights is not None:
-            correlation_heatmap(merged_flights, "Flights (merged by Loyalty)")
+        if flights_grouped is not None:
+            correlation_heatmap(flights_grouped, "Flights (grouped by Loyalty)")
         else:
-            st.info("Merged Flights dataset not available.")
+            st.info("Grouped flights dataset not available.")
 
 # -----------------------------
-# Flights Only: Numeric ↔ Numeric
+# Flights Only: Numeric ↔ Numeric (raw rows)
 # -----------------------------
 with tabs[3]:
     st.subheader("Flights Only – numeric vs numeric")
@@ -241,3 +290,4 @@ with tabs[3]:
                     st.write(f"**r = {r:.3f}**")
                 except Exception:
                     st.write("Could not compute correlation.")
+
